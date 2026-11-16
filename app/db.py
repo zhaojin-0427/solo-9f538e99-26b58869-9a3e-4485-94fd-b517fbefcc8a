@@ -83,6 +83,29 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 
 CREATE INDEX IF NOT EXISTS idx_reports_instance ON reports(instance_id, created_at);
+
+CREATE TABLE IF NOT EXISTS ratio_analyses (
+    id                  TEXT PRIMARY KEY,
+    report_id           TEXT NOT NULL REFERENCES reports(id),
+    instance_id         TEXT NOT NULL,
+    package_id          TEXT NOT NULL,
+    instance_revision   INTEGER NOT NULL,
+    package_revision    INTEGER NOT NULL,
+    numerator_concept   TEXT NOT NULL,
+    denominator_concept TEXT NOT NULL,
+    min_ratio           REAL NOT NULL,
+    max_ratio           REAL NOT NULL,
+    denominator_max_feasible REAL NOT NULL,
+    min_witness_json    TEXT NOT NULL,
+    max_witness_json    TEXT NOT NULL,
+    detail_json         TEXT NOT NULL,
+    stale               INTEGER NOT NULL DEFAULT 0,
+    stale_reason        TEXT,
+    created_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_analyses_report ON ratio_analyses(report_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_analyses_instance ON ratio_analyses(instance_id, created_at);
 """
 
 

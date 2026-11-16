@@ -114,3 +114,47 @@ class ReportList(BaseModel):
     instance_id: str
     current: Optional[ReportOut] = None
     history: list[ReportOut]
+
+
+# ------------------------------------------------------------- ratio analyses
+class RatioAnalysisRequest(BaseModel):
+    numerator_concept: str = Field(
+        ..., description="分子概念 QName，例如 acct:NetIncome"
+    )
+    denominator_concept: str = Field(
+        ..., description="分母概念 QName，例如 acct:Revenues；任一可行解中不为正才受理"
+    )
+
+
+class RatioWitnessFact(BaseModel):
+    concept: str
+    reported_value: float
+    decimals: object
+    true_value: float
+    lower: float
+    upper: float
+
+
+class RatioAnalysisOut(BaseModel):
+    analysis_id: str
+    report_id: str
+    instance_id: str
+    package_id: str
+    instance_revision: int
+    package_revision: int
+    numerator_concept: str
+    denominator_concept: str
+    min_ratio: float
+    max_ratio: float
+    denominator_max_feasible: float
+    min_witness: list[RatioWitnessFact]
+    max_witness: list[RatioWitnessFact]
+    detail: dict
+    stale: bool
+    stale_reason: Optional[str] = None
+    created_at: str
+
+
+class RatioAnalysisList(BaseModel):
+    report_id: str
+    analyses: list[RatioAnalysisOut]

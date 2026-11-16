@@ -15,6 +15,11 @@ MAX_EQUATIONS = 30
 # and the (weighted) summation equations.
 WITNESS_TOL = 1e-9
 
+# Relative floor for the Charnes-Cooper scale / strict denominator positivity:
+# a denominator whose largest feasible value does not exceed RATIO_EPS times the
+# magnitude of the data is treated as "never strictly positive".
+RATIO_EPS = 1e-7
+
 
 def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)

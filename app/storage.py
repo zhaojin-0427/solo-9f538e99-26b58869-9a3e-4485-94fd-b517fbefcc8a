@@ -4,10 +4,12 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
 from . import db
 from .errors import NotFound, StaleRevision
 from .instance import parse_instance
+from .ratios import ratio_range
 from .solver import check_facts
 from .taxonomy import parse_package
 
@@ -368,3 +370,162 @@ def list_reports(iid: str) -> dict:
         (r for r in reversed(history) if not r["superseded"] and not r["late"]), None
     )
     return {"instance_id": iid, "current": current, "history": history}
+
+
+# ---------------------------------------------------------------- ratio analyses
+def _analysis_out(row: dict) -> dict:
+    return {
+        "analysis_id": row["id"],
+        "report_id": row["report_id"],
+        "instance_id": row["instance_id"],
+        "package_id": row["package_id"],
+        "instance_revision": row["instance_revision"],
+        "package_revision": row["package_revision"],
+        "numerator_concept": row["numerator_concept"],
+        "denominator_concept": row["denominator_concept"],
+        "min_ratio": row["min_ratio"],
+        "max_ratio": row["max_ratio"],
+        "denominator_max_feasible": row["denominator_max_feasible"],
+        "min_witness": json.loads(row["min_witness_json"]),
+        "max_witness": json.loads(row["max_witness_json"]),
+        "detail": json.loads(row["detail_json"]),
+        "stale": bool(row["stale"]),
+        "stale_reason": row["stale_reason"],
+        "created_at": row["created_at"],
+    }
+
+
+def _source_staleness(conn, instance_id: str, package_id: str,
+                      instance_revision: int, package_revision: int) -> Optional[str]:
+    """Return why the given source revisions are no longer current, or None."""
+    inst = conn.execute(
+        "SELECT latest_rev FROM instances WHERE id=?", (instance_id,)
+    ).fetchone()
+    if inst is not None and inst["latest_rev"] > instance_revision:
+        return (
+            f"instance revision {instance_revision} superseded by "
+            f"{inst['latest_rev']}"
+        )
+    pkg = conn.execute(
+        "SELECT latest_rev FROM packages WHERE id=?", (package_id,)
+    ).fetchone()
+    if pkg is not None and pkg["latest_rev"] > package_revision:
+        return (
+            f"package revision {package_revision} superseded by "
+            f"{pkg['latest_rev']}"
+        )
+    return None
+
+
+def _rebuild_sources(report: dict) -> tuple[list[dict], list[dict]]:
+    """Rebuild the feasible truth-set inputs from the report's own snapshots."""
+    package_info = parse_package(
+        bytes(report["xsd_snapshot"]), bytes(report["calc_snapshot"])
+    )
+    instance_info = parse_instance(bytes(report["instance_snapshot"]), package_info)
+    return instance_info["facts"], package_info["equations"]
+
+
+def create_ratio_analysis(rid: str, numerator: str, denominator: str) -> dict:
+    conn = db.get_conn()
+    row = conn.execute("SELECT * FROM reports WHERE id=?", (rid,)).fetchone()
+    if row is None:
+        raise NotFound(f"report '{rid}' not found")
+    report = dict(row)
+
+    if report["status"] != "feasible":
+        from .errors import BadPayload
+        raise BadPayload(
+            f"ratio analysis requires a feasible report; report status is "
+            f"'{report['status']}'",
+            code="report_not_feasible",
+        )
+
+    # 发布前强校验来源修订：任一来源已更正即拒绝发布（412）。
+    reason = _source_staleness(
+        conn, report["instance_id"], report["package_id"],
+        report["instance_revision"], report["package_revision"],
+    )
+    if reason is not None:
+        raise StaleRevision(
+            f"report '{rid}' is based on corrected sources: {reason}; "
+            f"publish a new report before creating an analysis"
+        )
+
+    # 按报告保存的实例、XSD 与计算关系重建可行真值集合（不沿用原报告见证）。
+    facts, equations = _rebuild_sources(report)
+
+    # 求解在写库之前完成：任何失败都不会留下半份分析。
+    result = ratio_range(facts, equations, numerator, denominator)
+
+    detail = {
+        "entity": json.loads(report["detail_json"]).get("entity"),
+        "period": json.loads(report["detail_json"]).get("period"),
+        "currency": json.loads(report["detail_json"]).get("currency"),
+        "fact_count": result["concept_count"],
+        "equation_count": result["equation_count"],
+        "solver": result["solver"],
+        "sources": "rebuilt from report snapshots (instance/xsd/calc)",
+    }
+    analysis_id = _new_id("ana")
+    now = _now()
+    with conn:
+        conn.execute(
+            "INSERT INTO ratio_analyses(id, report_id, instance_id, package_id, "
+            "instance_revision, package_revision, numerator_concept, "
+            "denominator_concept, min_ratio, max_ratio, denominator_max_feasible, "
+            "min_witness_json, max_witness_json, detail_json, stale, stale_reason, "
+            "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,?)",
+            (analysis_id, rid, report["instance_id"], report["package_id"],
+             report["instance_revision"], report["package_revision"],
+             numerator, denominator, result["min_ratio"], result["max_ratio"],
+             result["denominator_max_feasible"],
+             json.dumps(result["min_witness"]),
+             json.dumps(result["max_witness"]),
+             json.dumps(detail), now),
+        )
+    saved = conn.execute(
+        "SELECT * FROM ratio_analyses WHERE id=?", (analysis_id,)
+    ).fetchone()
+    return _analysis_out(dict(saved))
+
+
+def _refresh_staleness(conn, row: dict) -> dict:
+    """Lazily flag an analysis stale when either source was corrected."""
+    if not row["stale"]:
+        reason = _source_staleness(
+            conn, row["instance_id"], row["package_id"],
+            row["instance_revision"], row["package_revision"],
+        )
+        if reason is not None:
+            with conn:
+                conn.execute(
+                    "UPDATE ratio_analyses SET stale=1, stale_reason=? WHERE id=?",
+                    (reason, row["id"]),
+                )
+            row["stale"] = 1
+            row["stale_reason"] = reason
+    return row
+
+
+def get_ratio_analysis(aid: str) -> dict:
+    conn = db.get_conn()
+    row = conn.execute("SELECT * FROM ratio_analyses WHERE id=?", (aid,)).fetchone()
+    if row is None:
+        raise NotFound(f"ratio analysis '{aid}' not found")
+    row = _refresh_staleness(conn, dict(row))
+    return _analysis_out(row)
+
+
+def list_ratio_analyses(rid: str) -> dict:
+    conn = db.get_conn()
+    if conn.execute("SELECT 1 FROM reports WHERE id=?", (rid,)).fetchone() is None:
+        raise NotFound(f"report '{rid}' not found")
+    rows = conn.execute(
+        "SELECT * FROM ratio_analyses WHERE report_id=? ORDER BY created_at, rowid",
+        (rid,),
+    ).fetchall()
+    return {
+        "report_id": rid,
+        "analyses": [_analysis_out(_refresh_staleness(conn, dict(r))) for r in rows],
+    }

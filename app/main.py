@@ -11,7 +11,9 @@ from fastapi.responses import JSONResponse, Response
 from . import storage
 from .db import init_db
 from .errors import ApiError
-from .models import (CheckAck, InstanceOut, PackageOut, ReportList, ReportOut)
+from .models import (CheckAck, InstanceOut, PackageOut, RatioAnalysisList,
+                     RatioAnalysisOut, RatioAnalysisRequest, ReportList,
+                     ReportOut)
 
 
 @asynccontextmanager
@@ -143,3 +145,26 @@ def report_snapshot(report_id: str, kind: str):
         raise BadPayload("kind must be one of instance, xsd, calc")
     data, media = storage.get_report_snapshot(report_id, kind)
     return Response(content=data, media_type=media)
+
+
+# ------------------------------------------------------------- ratio analyses
+@app.post("/reports/{report_id}/ratio-analyses", response_model=RatioAnalysisOut,
+          status_code=201, tags=["ratio-analyses"],
+          summary="按报告快照重建可行真值集合，求比率最小/最大值及完整金额见证")
+def create_ratio_analysis(report_id: str, body: RatioAnalysisRequest):
+    return storage.create_ratio_analysis(
+        report_id, body.numerator_concept, body.denominator_concept
+    )
+
+
+@app.get("/reports/{report_id}/ratio-analyses", response_model=RatioAnalysisList,
+         tags=["ratio-analyses"], summary="列出某份报告下的全部比率分析（含过期标记）")
+def list_ratio_analyses(report_id: str):
+    return storage.list_ratio_analyses(report_id)
+
+
+@app.get("/ratio-analyses/{analysis_id}", response_model=RatioAnalysisOut,
+         tags=["ratio-analyses"],
+         summary="按 ID 读取历史分析；来源更正后读取时标记 stale，原报告不改写")
+def get_ratio_analysis(analysis_id: str):
+    return storage.get_ratio_analysis(analysis_id)
